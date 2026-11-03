@@ -29,7 +29,9 @@ from typing import Any
 
 import af3_runtime as _runtime
 import jax
+import numpy as np
 from absl import app, flags
+from jax import numpy as jnp
 from alphafold3.constants import chemical_components
 from alphafold3.data import featurisation as _featurisation
 
@@ -78,6 +80,9 @@ _SAVE_FULL_OUTPUTS = flags.DEFINE_bool(
 # Written by the OpenFold3 weight converter; the two names must match.
 _PROVENANCE_FILENAME = "of3_ported_weights.provenance.json"
 
+# IntelliFold-v2 converted weights include this Fourier embedding file alongside the .bin.zst.
+_INTELLIFOLD_FOURIER_FILENAME = "intellifold_v2_fourier.npz"
+
 
 def _is_of3_model_dir(model_dir: pathlib.Path) -> bool:
     """Report whether ``model_dir`` holds converted OpenFold3 parameters."""
@@ -106,6 +111,68 @@ def _is_of3_model_dir(model_dir: pathlib.Path) -> bool:
             "recorded ones; re-convert the OpenFold3 weights."
         )
     return True
+
+
+def _is_intellifold_model_dir(model_dir: pathlib.Path) -> pathlib.Path | None:
+    """If ``model_dir`` holds IntelliFold-v2 converted weights, return the Fourier ``.npz`` path."""
+    fourier_path = model_dir / _INTELLIFOLD_FOURIER_FILENAME
+    return fourier_path if fourier_path.is_file() else None
+
+
+def _apply_intellifold_fourier_patch(fourier_path: pathlib.Path) -> None:
+    """Monkey-patch AF3's hardcoded Fourier noise-embedding with IntelliFold-v2's trained one."""
+    from alphafold3.model.network import noise_level_embeddings as nle
+
+    data = np.load(str(fourier_path))
+    weight_np = np.asarray(data["weight"], dtype=np.float32)
+    bias_np = np.asarray(data["bias"], dtype=np.float32)
+
+    def noise_embeddings(sigma_scaled_noise_level):
+        transformed = (1 / 4) * jnp.log(sigma_scaled_noise_level)
+        w = jnp.asarray(weight_np, dtype=jnp.float32)
+        b = jnp.asarray(bias_np, dtype=jnp.float32)
+        return jnp.cos(2 * jnp.pi * (transformed[..., None] * w + b))
+
+    nle.noise_embeddings = noise_embeddings
+    print(
+        f"IntelliFold-v2 Fourier embedding patched from {fourier_path} "
+        f"(weight{weight_np.shape}, bias{bias_np.shape})",
+        file=sys.stderr,
+        flush=True,
+    )
+
+
+# IntelliFold-v2 "full_fat" dimensions. Everything not listed is identical to stock AF3.
+_INTELLIFOLD_FULLFAT = {
+    "evoformer.pair_channel": 512,
+    "evoformer.msa_channel": 256,
+    "evoformer.template.num_channels": 256,
+    "heads.diffusion.conditioning.pair_channel": 512,
+    "evoformer.msa_stack.pair_attention.num_head": 8,
+    "evoformer.pairformer.pair_attention.num_head": 8,
+    "evoformer.template.template_stack.pair_attention.num_head": 8,
+    "heads.confidence.pairformer.pair_attention.num_head": 8,
+}
+
+
+def _apply_intellifold_config(config) -> None:
+    """Widen ``config`` in place to IntelliFold-v2 (full_fat) dimensions."""
+    for dotted, value in _INTELLIFOLD_FULLFAT.items():
+        *parents, leaf = dotted.split(".")
+        node = config
+        for p in parents:
+            if not hasattr(node, p):
+                raise AttributeError(
+                    f"IntelliFold full_fat config path {dotted!r} not found at {p!r}. "
+                    "The AlphaFold 3 config layout may have changed."
+                )
+            node = getattr(node, p)
+        if not hasattr(node, leaf):
+            raise AttributeError(
+                f"IntelliFold full_fat config path {dotted!r} not found (missing {leaf!r})."
+            )
+        setattr(node, leaf, value)
+    print("Model config widened to full_fat (IntelliFold-v2)", file=sys.stderr, flush=True)
 
 
 def _build_fold_input(payload: dict) -> Any:
@@ -249,23 +316,32 @@ def _setup_runner() -> tuple[Any, datetime.date, bool]:
     model_dir = _MODEL_DIR.value or os.environ.get("AF3_MODEL_DIR")
     if model_dir is None:
         raise ValueError("--model_dir or AF3_MODEL_DIR is required")
-    of3_weights = _is_of3_model_dir(pathlib.Path(model_dir))
+    model_dir_path = pathlib.Path(model_dir)
+    of3_weights = _is_of3_model_dir(model_dir_path)
+    intellifold_fourier = _is_intellifold_model_dir(model_dir_path)
+    if of3_weights and intellifold_fourier:
+        raise ValueError(
+            f"{model_dir} has both OF3 provenance and IntelliFold fourier — ambiguous weight family."
+        )
     if of3_weights and _SAVE_FULL_OUTPUTS.value:
-        # Retained CIFs carry AlphaFold3's non-commercial terms, which misstate the
-        # licence of Apache-2.0 OpenFold3 outputs.
         raise ValueError(
             "--save_full_outputs is not supported with converted OpenFold3 weights: "
             "retained CIFs would carry AlphaFold3 output terms that do not apply to them."
         )
+    if intellifold_fourier:
+        _apply_intellifold_fourier_patch(intellifold_fourier)
+    config = _runtime.make_model_config(
+        flash_attention_implementation=_FLASH_ATTENTION_IMPLEMENTATION.value,
+        num_diffusion_samples=_NUM_DIFFUSION_SAMPLES.value,
+        num_recycles=_NUM_RECYCLES.value,
+        of3_weights=of3_weights,
+    )
+    if intellifold_fourier:
+        _apply_intellifold_config(config)
     model_runner = _runtime.ModelRunner(
-        config=_runtime.make_model_config(
-            flash_attention_implementation=_FLASH_ATTENTION_IMPLEMENTATION.value,
-            num_diffusion_samples=_NUM_DIFFUSION_SAMPLES.value,
-            num_recycles=_NUM_RECYCLES.value,
-            of3_weights=of3_weights,
-        ),
+        config=config,
         device=devices[gpu_device],
-        model_dir=pathlib.Path(model_dir),
+        model_dir=model_dir_path,
         cache_dir=(pathlib.Path(_JAX_COMPILATION_CACHE_DIR.value) if _JAX_COMPILATION_CACHE_DIR.value else None),
     )
     _ = model_runner.model_params  # force weights load

@@ -1,0 +1,18 @@
+# IntelliFold-v2 refolding oracle.
+#
+# Point AF3_MODEL_DIR at a directory containing intellifold_v2.bin.zst
+# and intellifold_v2_fourier.npz; the worker auto-detects the weights
+# and applies the full_fat config + Fourier patch.
+
+defaults:
+  - af3
+  - _self_
+
+oracle:
+  oracle_name: intellifold
+
+oracle_ppi:
+  oracle_name: intellifold_ppi
+
+oracle_dna:
+  oracle_name: intellifold_dna

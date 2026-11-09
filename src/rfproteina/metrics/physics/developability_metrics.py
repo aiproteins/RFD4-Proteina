@@ -2,14 +2,17 @@
 
 Sequence metrics (GRAVY, Guruprasad instability index) are computed in-process from
 the designed-chain sequence. Structure metrics (Rosetta SAP score and
-ExposedHydrophobics) run via a nested PyRosetta apptainer, following the same pattern
-as HBDesigner PyRosetta scoring.
+ExposedHydrophobics) shell out to ``score_pose_rosetta.py``, run either by an interpreter
+that can import pyrosetta (e.g. a conda env with pyrosetta installed) or, failing that,
+inside a nested PyRosetta apptainer -- the same pattern as HBDesigner PyRosetta scoring.
 """
 
+import importlib.util
 import json
 import os
 import shutil
 import subprocess
+import sys
 import tempfile
 from functools import cached_property
 from pathlib import Path
@@ -188,8 +191,20 @@ class SequenceDevelopabilityMetric(Metric):
         }
 
 
+def _host_python_with_pyrosetta() -> str | None:
+    """This interpreter, if it can import pyrosetta; else None. Does not import pyrosetta."""
+    try:
+        return sys.executable if importlib.util.find_spec("pyrosetta") is not None else None
+    except (ImportError, ValueError):
+        return None
+
+
 class RosettaDevelopabilityMetric(Metric):
-    """Rosetta SAP score and ExposedHydrophobics via a nested PyRosetta apptainer.
+    """Rosetta SAP score and ExposedHydrophobics via a PyRosetta subprocess.
+
+    The scoring helper runs under the first available of: ``python_bin``, ``$PYROSETTA_PYTHON``,
+    this interpreter when it can import pyrosetta, or a nested apptainer image
+    (``container`` / ``$PYROSETTA_CONTAINER``).
 
     Reports:
         - ``sap_score``: whole-pose SAP (``calculate_sap``)
@@ -202,6 +217,7 @@ class RosettaDevelopabilityMetric(Metric):
     def __init__(
         self,
         container: str | None = None,
+        python_bin: str | None = None,
         score_script: str | None = None,
         apptainer_bin: str | None = None,
         sasa_cutoff: float = 20.0,
@@ -210,6 +226,9 @@ class RosettaDevelopabilityMetric(Metric):
         scratch_dir: str | None = None,
         **kwargs: Any,
     ) -> None:
+        # A host interpreter that can import pyrosetta beats the container: it is what makes
+        # a stale $PYROSETTA_CONTAINER harmless on clusters that install pyrosetta into the env.
+        self.python_bin = python_bin or os.environ.get("PYROSETTA_PYTHON") or _host_python_with_pyrosetta()
         container = container or os.environ.get("PYROSETTA_CONTAINER")
         self.container = Path(container) if container else None
         default_script = Path(__file__).with_name("score_pose_rosetta.py")
@@ -253,12 +272,16 @@ class RosettaDevelopabilityMetric(Metric):
         predicted_atom_array: AtomArray,
         chain_of_interest: str | None = None,
     ) -> dict[str, float]:
-        if self.container is None:
-            raise OSError("PyRosetta container not set: pass container=... or set $PYROSETTA_CONTAINER.")
-        if not self.container.is_file():
-            raise FileNotFoundError(f"PyRosetta container missing: {self.container}")
         if not self.score_script.is_file():
             raise FileNotFoundError(f"Rosetta score script missing: {self.score_script}")
+        if self.python_bin is None:
+            if self.container is None:
+                raise OSError(
+                    "PyRosetta not available: install pyrosetta in the run environment, or set "
+                    "$PYROSETTA_PYTHON (interpreter) or $PYROSETTA_CONTAINER (apptainer image)."
+                )
+            if not self.container.is_file():
+                raise FileNotFoundError(f"PyRosetta container missing: {self.container}")
 
         designed = subset_to_designed_protein(predicted_atom_array, chain_of_interest)
         if designed.array_length() == 0:
@@ -269,12 +292,17 @@ class RosettaDevelopabilityMetric(Metric):
             cif_path = Path(tmp) / "design.cif"
             out_json = Path(tmp) / "score.json"
             write_input_structure_cif(designed, cif_path)
-            command = [
-                self.apptainer_bin,
-                "exec",
-                *[arg for bind in self.binds for arg in ("--bind", bind)],
-                str(self.container),
-                "python",
+            if self.python_bin is not None:
+                command = [self.python_bin]
+            else:
+                command = [
+                    self.apptainer_bin,
+                    "exec",
+                    *[arg for bind in self.binds for arg in ("--bind", bind)],
+                    str(self.container),
+                    "python",
+                ]
+            command += [
                 str(self.score_script),
                 "--cif",
                 str(cif_path),

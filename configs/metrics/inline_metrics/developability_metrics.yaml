@@ -1,5 +1,6 @@
 # Developability triage metrics (opt-in via metrics_tags=['developability']).
-# Rosetta metrics require a PyRosetta apptainer set via $PYROSETTA_CONTAINER.
+# The Rosetta metrics need a reachable PyRosetta: pyrosetta importable in the run env,
+# else $PYROSETTA_PYTHON (an interpreter), else $PYROSETTA_CONTAINER (an apptainer image).
 
 sequence_developability:
   _target_: rfproteina.metrics.physics.developability_metrics.SequenceDevelopabilityMetric

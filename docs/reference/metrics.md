@@ -74,7 +74,7 @@ These run directly on the generated structure, before any oracle refolds it.
 | `sequence_developability` | any: `developability`<br>not: `small_molecule_only`, `structure_prediction` | GRAVY and the Guruprasad instability index on the designed chain. Half-life is deliberately omitted | `gravy`, `instability_index` |
 | `antibody_contacts` | any: `antibody` | Fraction of contacting variable-domain residues in Chothia CDRs | `cdr_contact_count`, `fw_contact_count`, `cdr_contact_fraction` |
 | `cdr_torsion_naturalness` | any: `antibody` | Chothia CDR phi/psi naturalness against native samples. Opt in with `metrics/inline_metrics=all_inline_metrics_with_cdr_torsion`; the reference data is downloaded from Hugging Face on first use | `H1`–`L3`, corresponding `*_length`, `n_scored_cdrs` |
-| `rosetta_developability` | any: `developability`<br>not: `small_molecule_only`, `structure_prediction` | Rosetta SAP and ExposedHydrophobics through a nested PyRosetta apptainer. Set `PYROSETTA_CONTAINER` outside the configured cluster environments | `sap_score`, `hydrophobic_exposure_sasa` |
+| `rosetta_developability` | any: `developability`<br>not: `small_molecule_only`, `structure_prediction` | Rosetta SAP and ExposedHydrophobics through a PyRosetta subprocess: the run environment's own pyrosetta if importable, else `$PYROSETTA_PYTHON`, else a nested apptainer image set via `$PYROSETTA_CONTAINER` | `sap_score`, `hydrophobic_exposure_sasa` |
 
 `design_motif_allatom_rmsd` and `design_unindexed_motif_allatom_rmsd` read their ground truth off
 [standard annotations](output-format.md#standard-annotations-and-why-there-is-no-output-json) written
